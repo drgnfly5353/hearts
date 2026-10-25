@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hearts</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #111; color: #e8e8e8; }
+  body { display: flex; flex-direction: column; font: clamp(10px, 1.9vw, 15px)/1.35 Consolas, "Courier New", monospace; }
+  #out { flex: 1; margin: 0; padding: 16px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; }
+  #bar { display: flex; gap: 8px; padding: 10px 16px; border-top: 1px solid #333; }
+  #in { flex: 1; font: inherit; color: inherit; background: #1c1c1c; border: 1px solid #444; border-radius: 4px; padding: 6px 8px; }
+  #in:focus { outline: 1px solid #e57399; }
+  #in:disabled { opacity: .5; }
+</style>
+</head>
+<body>
+<pre id="out">Loading Python...</pre>
+<div id="bar"><input id="in" autocomplete="off" autocapitalize="off" spellcheck="false" disabled placeholder="type here and press Enter"></div>
+
+<script src="https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js"></script>
+
+<!-- Runs hearts.py unchanged: the code is converted so input() and time.sleep()
+     wait without freezing the page. -->
+<script type="text/x-python" id="convert">
+import ast, builtins
+
+class _Async(ast.NodeTransformer):
+    def __init__(self, defs):
+        self.defs = defs
+    def visit_FunctionDef(self, node):
+        self.generic_visit(node)
+        new = ast.AsyncFunctionDef(**{f: getattr(node, f, None) for f in node._fields})
+        return ast.copy_location(new, node)
+    def visit_Call(self, node):
+        self.generic_visit(node)
+        f = node.func
+        if isinstance(f, ast.Name) and f.id == "input":
+            node.func = ast.Name("web_input", ast.Load())
+            return ast.Await(node)
+        if isinstance(f, ast.Attribute) and f.attr == "sleep" and isinstance(f.value, ast.Name) and f.value.id == "time":
+            node.func = ast.Attribute(ast.Name("asyncio", ast.Load()), "sleep", ast.Load())
+            return ast.Await(node)
+        if isinstance(f, ast.Name) and (f.id in self.defs or not hasattr(builtins, f.id)):
+            return ast.Await(node)
+        return node
+
+def convert(src):
+    tree = ast.parse(src)
+    defs = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    tree = ast.fix_missing_locations(_Async(defs).visit(tree))
+    return compile(tree, "hearts.py", "exec", flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
+</script>
+
+<script type="text/x-python" id="run">
+import asyncio, os, sys, js
+from pyodide.http import pyfetch
+
+class _Out:
+    def write(self, s):
+        js.termWrite(s)
+        return len(s)
+    def flush(self):
+        pass
+
+sys.stdout = sys.stderr = _Out()
+os.system = lambda cmd: (js.termClear(), 0)[1]
+
+async def web_input(prompt=""):
+    sys.stdout.write(str(prompt))
+    return str(await js.readLine())
+
+src = await (await pyfetch("hearts.py")).string()
+game = {"__name__": "__main__", "web_input": web_input, "asyncio": asyncio}
+result = eval(convert(src), game)
+if result is not None:
+    await result
+</script>
+
+<script>
+  const out = document.getElementById("out");
+  const inp = document.getElementById("in");
+  let pending = null;
+
+  window.termWrite = (s) => {
+    const stick = out.scrollTop + out.clientHeight >= out.scrollHeight - 40;
+    out.append(s);
+    if (stick) out.scrollTop = out.scrollHeight;
+  };
+  window.termClear = () => { out.textContent = ""; };
+  window.readLine = () => new Promise((resolve) => {
+    pending = resolve;
+    inp.disabled = false;
+    inp.focus();
+  });
+
+  inp.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" || !pending) return;
+    const line = inp.value;
+    inp.value = "";
+    inp.disabled = true;
+    termWrite(line + "\n");
+    out.scrollTop = out.scrollHeight;
+    const r = pending; pending = null; r(line);
+  });
+  out.addEventListener("click", () => { if (!inp.disabled) inp.focus(); });
+
+  (async () => {
+    try {
+      const py = await loadPyodide();
+      out.textContent = "";
+      py.runPython(document.getElementById("convert").textContent);
+      await py.runPythonAsync(document.getElementById("run").textContent);
+      termWrite("\n\n  Thanks for playing! Refresh the page to play again.\n");
+    } catch (err) {
+      termWrite("\n\nSomething went wrong:\n" + err + "\n");
+    }
+    inp.disabled = true;
+  })();
+</script>
+</body>
+</html>
